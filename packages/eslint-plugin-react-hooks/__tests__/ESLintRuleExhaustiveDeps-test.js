@@ -36,6 +36,137 @@ const tests = {
   valid: [
     {
       code: normalizeIndent`
+        import { someImport } from 'some/module';
+
+        function MyComponent() {
+          useEffect(() => {
+            console.log(someImport);
+          }, []);
+        }
+      `,
+    },
+    {
+      code: normalizeIndent`
+        import { someImport } from 'some/module';
+        function MyComponent() {
+          const local = someFunc();
+          const instance = someImport();
+          useEffect(() => {
+            console.log(local);
+            instance.method('/foo');
+          }, [local]);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      code: normalizeIndent`
+        import { someImport } from 'some/module';
+        function MyComponent() {
+          const local = someFunc();
+          const instance2 = someImport();
+          const instance = someImport();
+          useEffect(() => {
+            console.log(local);
+            if (true) {
+              instance.method('/foo');
+              instance2.method('/foo');
+            }
+          }, [local]);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      code: normalizeIndent`
+        import { someImport  } from 'some/module';
+        function MyComponent() {
+          const local = someFunc();
+          const instance = someImport();
+          useEffect(() => {
+            console.log(local);
+            if (instance.property) {
+              instance.method('/foo');
+            }
+          }, [local, instance.property]);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      code: normalizeIndent`
+        import { someImport } from 'some/non-matching-module';
+        function MyComponent() {
+          const local = someFunc();
+          const instance = someImport();
+          useEffect(() => {
+            console.log(local);
+            if (instance.property) {
+              instance.method('/foo');
+            }
+          }, [local, instance]);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    {
+      code: normalizeIndent`
         function MyComponent() {
           const local = {};
           useEffect(() => {
@@ -1454,6 +1585,157 @@ const tests = {
     },
   ],
   invalid: [
+    {
+      code: normalizeIndent`
+        import { someImport } from 'some/module';
+        function MyComponent() {
+          const instance = someImport();
+          useEffect(() => {
+            const instanceReady = instance.property;
+            if (instanceReady) {
+            }
+          }, []);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      errors: [
+        {
+          message:
+            "React Hook useEffect has a missing dependency: 'instance.property'. " +
+            'Either include it or remove the dependency array.',
+          suggestions: [
+            {
+              desc: 'Update the dependencies array to be: [instance.property]',
+              output: normalizeIndent`
+                import { someImport } from 'some/module';
+                function MyComponent() {
+                  const instance = someImport();
+                  useEffect(() => {
+                    const instanceReady = instance.property;
+                    if (instanceReady) {
+                    }
+                  }, [instance.property]);
+                }
+              `,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      code: normalizeIndent`
+        import { someImport } from 'some/module';
+        function MyComponent() {
+          const instance = someImport();
+          useEffect(() => {
+            if (instance.property) {
+            }
+          }, []);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      errors: [
+        {
+          message:
+            "React Hook useEffect has a missing dependency: 'instance.property'. " +
+            'Either include it or remove the dependency array.',
+          suggestions: [
+            {
+              desc: 'Update the dependencies array to be: [instance.property]',
+              output: normalizeIndent`
+                import { someImport } from 'some/module';
+                function MyComponent() {
+                  const instance = someImport();
+                  useEffect(() => {
+                    if (instance.property) {
+                    }
+                  }, [instance.property]);
+                }
+              `,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      code: normalizeIndent`
+        import { someImport } from 'some/module';
+        function MyComponent() {
+          const local = someFunc();
+          const instance = someImport();
+          useEffect(() => {
+            console.log(local);
+            instance.method('/foo');
+          }, [local, instance]);
+        }
+      `,
+      options: [
+        {
+          effectDisallowedDependencies: [
+            {
+              module: 'some/module',
+              imports: [
+                {
+                  name: 'someImport',
+                  fields: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      errors: [
+        {
+          message:
+            "React Hook useEffect has an unnecessary dependency: 'instance'. " +
+            'Either exclude it or remove the dependency array.',
+          suggestions: [
+            {
+              desc: 'Update the dependencies array to be: [local]',
+              output: normalizeIndent`
+                import { someImport } from 'some/module';
+                function MyComponent() {
+                  const local = someFunc();
+                  const instance = someImport();
+                  useEffect(() => {
+                    console.log(local);
+                    instance.method('/foo');
+                  }, [local]);
+                }
+              `,
+            },
+          ],
+        },
+      ],
+    },
     {
       code: normalizeIndent`
         function MyComponent(props) {
