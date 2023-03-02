@@ -198,20 +198,21 @@ export default {
       // Disallowed dependencies are specified in the eslint rule config
       // import { moduleImport } from 'some/module'
       // ...
-      // const instance = moduleImport()
-      //       ^^^ true for this reference to 'some/module'
+      // returns { importModuleName: 'some/module', importName: 'moduleImport' }
+      // if the importModuleName and importName are configured options in the
+      // effectDisallowedDependenciesMap. Otherwise returns undefined.
       function isDisallowedDependency(resolved) {
         if (!isArray(resolved.defs)) {
-          return false;
+          return undefined;
         }
 
         const def = resolved.defs[0];
         if (def == null) {
-          return false;
+          return undefined;
         }
 
         if (def.node.type !== 'VariableDeclarator') {
-          return false;
+          return undefined;
         }
 
         const resolvedImportModule = resolveImportModuleForDef(
