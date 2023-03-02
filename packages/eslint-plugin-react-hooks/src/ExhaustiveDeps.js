@@ -32,6 +32,39 @@ export default {
           enableDangerousAutofixThisMayCauseInfiniteLoops: {
             type: 'boolean',
           },
+          effectDisallowedDependencies: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['module', 'imports'],
+              properties: {
+                module: {
+                  type: 'string',
+                },
+                imports: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['name', 'fields'],
+                    properties: {
+                      name: {
+                        type: 'string',
+                      },
+                      fields: {
+                        type: 'array',
+                        items: {
+                          type: 'string',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     ],
@@ -51,9 +84,23 @@ export default {
         context.options[0].enableDangerousAutofixThisMayCauseInfiniteLoops) ||
       false;
 
+    const effectDisallowedDependencies =
+      (context.options &&
+        context.options[0] &&
+        context.options[0].effectDisallowedDependencies) ||
+      [];
+
+    const effectDisallowedDependenciesMap = new Map(
+      effectDisallowedDependencies.map(({module, imports}) => [
+        module,
+        imports,
+      ]),
+    );
+
     const options = {
       additionalHooks,
       enableDangerousAutofixThisMayCauseInfiniteLoops,
+      effectDisallowedDependenciesMap,
     };
 
     function reportProblem(problem) {
@@ -148,6 +195,44 @@ export default {
 
       const isArray = Array.isArray;
 
+      // Disallowed dependencies are specified in the eslint rule config
+      // import { moduleImport } from 'some/module'
+      // ...
+      // returns { importModuleName: 'some/module', importName: 'moduleImport' }
+      // if the importModuleName and importName are configured options in the
+      // effectDisallowedDependenciesMap. Otherwise returns undefined.
+      function isDisallowedDependency(resolved) {
+        if (!isArray(resolved.defs)) {
+          return undefined;
+        }
+
+        const def = resolved.defs[0];
+        if (def == null) {
+          return undefined;
+        }
+
+        if (def.node.type !== 'VariableDeclarator') {
+          return undefined;
+        }
+
+        const resolvedImportModule = resolveImportModuleForDef(
+          componentScope,
+          def.node,
+        );
+        if (resolvedImportModule) {
+          const {importModuleName, importName} = resolvedImportModule;
+          let foundDependency = undefined;
+          const moduleImports =
+            options.effectDisallowedDependenciesMap.get(importModuleName);
+          if (moduleImports) {
+            // Find the import name and disallowed fields for this module
+            foundDependency = moduleImports.find(
+              moduleImport => moduleImport.name === importName,
+            );
+          }
+          return foundDependency;
+        }
+      }
       // Next we'll define a few helpers that helps us
       // tell if some values don't have to be declared as deps.
 
@@ -458,7 +543,25 @@ export default {
             const isStable =
               memoizedIsStableKnownHookValue(resolved) ||
               memoizedIsFunctionWithoutCapturedValues(resolved);
+
+            const foundDisallowedDependency = isDisallowedDependency(resolved);
+
+            let exemptedProperty = true;
+            if (
+              foundDisallowedDependency &&
+              dependencyNode.type === 'MemberExpression'
+            ) {
+              if (
+                !foundDisallowedDependency.fields.includes(
+                  dependencyNode.property.name,
+                )
+              ) {
+                exemptedProperty = false;
+              }
+            }
             dependencies.set(dependency, {
+              isConfigExemptDependency:
+                exemptedProperty && foundDisallowedDependency,
               isStable,
               references: [reference],
             });
@@ -1341,14 +1444,19 @@ function collectRecommendations({
     };
   }
 
+  const exemptDependencies = new Set();
   // Mark all required nodes first.
   // Imagine exclamation marks next to each used deep property.
-  dependencies.forEach((_, key) => {
+  dependencies.forEach(({isConfigExemptDependency}, key) => {
     const node = getOrCreateNodeByPath(depTree, key);
     node.isUsed = true;
     markAllParentsByPath(depTree, key, parent => {
       parent.isSubtreeUsed = true;
     });
+    if (isConfigExemptDependency) {
+      node.isConfigExemptDependency = true;
+      exemptDependencies.add(key);
+    }
   });
 
   // Mark all satisfied nodes.
@@ -1411,7 +1519,7 @@ function collectRecommendations({
         // `props.foo` is enough if you read `props.foo.id`.
         return;
       }
-      if (child.isUsed) {
+      if (child.isUsed && !child.isConfigExemptDependency) {
         // Remember that no declared deps satisfied this node.
         missingPaths.add(path);
         // If we got here, nothing in its subtree was satisfied.
@@ -1426,14 +1534,13 @@ function collectRecommendations({
       );
     });
   }
-
   // Collect suggestions in the order they were originally specified.
   const suggestedDependencies = [];
   const unnecessaryDependencies = new Set();
   const duplicateDependencies = new Set();
   declaredDependencies.forEach(({key}) => {
     // Does this declared dep satisfy a real need?
-    if (satisfyingDependencies.has(key)) {
+    if (satisfyingDependencies.has(key) && !exemptDependencies.has(key)) {
       if (suggestedDependencies.indexOf(key) === -1) {
         // Good one.
         suggestedDependencies.push(key);
@@ -1445,7 +1552,8 @@ function collectRecommendations({
       if (
         isEffect &&
         !key.endsWith('.current') &&
-        !externalDependencies.has(key)
+        !externalDependencies.has(key) &&
+        !exemptDependencies.has(key)
       ) {
         // Effects are allowed extra "unnecessary" deps.
         // Such as resetting scroll when ID changes.
@@ -1472,6 +1580,63 @@ function collectRecommendations({
     duplicateDependencies,
     missingDependencies,
   };
+}
+
+function resolveImportModuleForDef(scope, node) {
+  let init = node.init;
+  if (init == null) {
+    return null;
+  }
+
+  while (init.type === 'TSAsExpression') {
+    init = init.expression;
+  }
+  // Detect primitive constants
+  // const foo = 42
+  let declaration = node.parent;
+  if (declaration == null) {
+    // This might happen if variable is declared after the callback.
+    // In that case ESLint won't set up .parent refs.
+    // So we'll set them up manually.
+    fastFindReferenceWithParent(scope.block, node.id);
+    declaration = node.parent;
+    if (declaration == null) {
+      return null;
+    }
+  }
+
+  if (init.type !== 'CallExpression') {
+    return null;
+  }
+  const callee = init.callee;
+  if (callee.type !== 'Identifier') {
+    return null;
+  }
+  const id = node.id;
+  const {name} = callee;
+  if (id.type === 'Identifier') {
+    const moduleImport = scope.references.find(ref => {
+      if (!isSameIdentifier(ref.identifier, callee)) {
+        return false;
+      }
+      if (!ref.resolved || !ref.resolved.defs || !ref.resolved.defs[0]) {
+        return false;
+      }
+      return ref.resolved.defs[0].type === 'ImportBinding';
+    });
+
+    if (!moduleImport) {
+      return false;
+    }
+    const moduleImportSource = moduleImport.resolved.defs[0];
+    if (moduleImportSource.parent.type === 'ImportDeclaration') {
+      return {
+        importModuleName: moduleImportSource.parent.source.value,
+        importName: name,
+      };
+    }
+  }
+  return null;
 }
 
 // If the node will result in constructing a referentially unique value, return
